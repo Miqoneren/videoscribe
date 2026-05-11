@@ -1,1 +1,3 @@
-allow-scripts=dependencies
+enable-pre-post-scripts=true
+onlyBuiltDependencies[]=sharp
+onlyBuiltDependencies[]=unrs-resolver
