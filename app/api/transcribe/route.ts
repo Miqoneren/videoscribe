@@ -1,98 +1,58 @@
-/**
- * POST /api/transcribe
- * 
- * Server-side transcription endpoint.
- * Accepts base64 audio chunk, returns transcribed text.
- * 
- * Request body:
- * {
- *   audioBase64: string,      // Base64-encoded WAV audio
- *   chunkIndex?: number,      // For progress tracking
- *   totalChunks?: number,     // For progress tracking
- *   detectedLanguage?: string // Optional hint for Gemini
- * }
- * 
- * Response:
- * {
- *   text: string,             // Transcribed text for this chunk
- *   chunkIndex: number,
- *   totalChunks: number,
- *   detectedLanguage?: string
- * }
- */
-
 import { NextRequest, NextResponse } from 'next/server';
-import { transcribeAudio } from '@/lib/gemini/client';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
-export const runtime = 'nodejs';
-export const maxDuration = 60; // 60 seconds max for transcription
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export async function POST(req: NextRequest) {
   try {
-    const body = await request.json();
-    const { audioBase64, chunkIndex = 0, totalChunks = 1, detectedLanguage } = body;
-
-    // Validate input
-    if (!audioBase64 || typeof audioBase64 !== 'string') {
-      return NextResponse.json(
-        { error: 'audioBase64 is required and must be a string' },
-        { status: 400 }
-      );
+    if (!process.env.GEMINI_API_KEY) {
+      return NextResponse.json({ error: 'GEMINI_API_KEY is missing in .env.local' }, { status: 500 });
     }
 
-    // Validate base64 format (basic check)
-    if (!/^[A-Za-z0-9+/=]+$/.test(audioBase64)) {
-      return NextResponse.json(
-        { error: 'Invalid base64 audio data' },
-        { status: 400 }
-      );
+    const formData = await req.formData();
+    const file = formData.get('audio') as File;
+
+    if (!file) {
+      return NextResponse.json({ error: 'No audio file provided' }, { status: 400 });
     }
 
-    // Call Gemini for transcription
-    const text = await transcribeAudio(audioBase64, {
-      language: detectedLanguage,
-    });
-
-    return NextResponse.json({
-      text,
-      chunkIndex,
-      totalChunks,
-      detectedLanguage,
-      timestamp: new Date().toISOString(),
-    });
-
-  } catch (error) {
-    console.error('[/api/transcribe] Error:', error);
-
-    // Handle Gemini API errors gracefully
-    if (error instanceof Error) {
-      if (error.message.includes('GEMINI_API_KEY')) {
-        return NextResponse.json(
-          { error: 'Server configuration error: missing API key' },
-          { status: 500 }
-        );
-      }
-      if (error.message.includes('quota') || error.message.includes('rate limit')) {
-        return NextResponse.json(
-          { error: 'Service temporarily unavailable. Please try again.' },
-          { status: 429 }
-        );
-      }
+    // Safety limit for inline base64 uploads
+    if (file.size > 15 * 1024 * 1024) {
+      return NextResponse.json({ error: 'File too large. Please use audio files under 15MB for now.' }, { status: 400 });
     }
 
-    return NextResponse.json(
-      { error: 'Transcription failed. Please try again.' },
-      { status: 500 }
-    );
+    const bytes = await file.arrayBuffer();
+    const base64Audio = Buffer.from(bytes).toString('base64');
+    
+    // 🔧 FIX: Browsers often mislabel audio as video. Force correct audio MIME types.
+    let mimeType = file.type || 'audio/mpeg';
+    if (mimeType.startsWith('video/')) {
+      mimeType = mimeType.replace('video/', 'audio/');
+    }
+    if (file.name.endsWith('.m4a')) mimeType = 'audio/mp4';
+    if (file.name.endsWith('.mp3')) mimeType = 'audio/mpeg';
+    if (file.name.endsWith('.wav')) mimeType = 'audio/wav';
+    if (file.name.endsWith('.ogg')) mimeType = 'audio/ogg';
+    if (file.name.endsWith('.webm')) mimeType = 'audio/webm';
+
+    console.log(`🎙️ Processing: ${file.name} | Size: ${(file.size / 1024).toFixed(1)}KB | MIME: ${mimeType}`);
+
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+
+    const result = await model.generateContent([
+      {
+        inlineData: {
+          mimeType: mimeType,
+          data: base64Audio,
+        },
+      },
+      'Transcribe the following audio accurately. Do not translate. Output only the transcript.',
+    ]);
+
+    const response = await result.response;
+    return NextResponse.json({ transcript: response.text() });
+  } catch (error: any) {
+    console.error('❌ Transcription error:', error);
+    return NextResponse.json({ error: error.message || 'Failed to transcribe' }, { status: 500 });
   }
-}
-
-// OPTIONS handler for CORS preflight
-export async function OPTIONS(): Promise<NextResponse> {
-  return new NextResponse(null, {
-    headers: {
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    },
-  });
 }
